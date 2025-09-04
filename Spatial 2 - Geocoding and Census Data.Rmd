@@ -7,34 +7,139 @@ output: html
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
 ```
 
+This script uses a sample of data from Illinois, with addresses, to geocode and link to census data about counties in Illinois. Then we'll make some maps.
 
- This script is a worked example for finding census variables and downloading
- them using the census api and the tidycensus R wrapper on that api.
- The process works like this:
- 1) Load the libraries (tidyverse and tidycensus)
- 2) Decide what census data source you want to use
-    - There are many choices an overview of available apis is here: 
-          https://www.census.gov/data/developers/data-sets.html
-    - An overview of the data available through tidycensus is here: 
-          https://walker-data.com/tidycensus/reference/load_variables.html
-    - We'll be looking primarily at American Community Survey 5-year Estimates 
-        at the Tract level in this example, but you can use a _similar_ workflow
-        to get data at other levels
- 3) Decide what variables you want from that data source
-    - Here, we'll look for data on ethnoracial composition and rent
- 4) Find the variable codes using the load_variables() function
- 5) Use the get_acs() function to download the data we want from the census
- 6) Explore our data using some basic plots
+# 1) Geocoding
 
-
-# 1) Load the libraries (tidyverse and tidycensus)
+Prof. Somashekhar and I have been working on a project investigating the location of businesses on an alt-right ecommerce platform called 'PublicSquare' (PSQ). There is a sample of data from PSQ in `data/psq_sample.csv` as `psq_sample`. First we'll load the data and use glimpse to examine the variables therein. 
 
 ```{r}
 library(tidyverse)
-library(tidycensus) # install this if you need to
+
+psq_sample <- read_csv('data/psq_sample.csv') %>% distinct(pb_id, .keep_all = TRUE)
+glimpse(psq_sample)
 ```
 
-# 2) Decide what census data source you want to use
+
+Notice that one of the columns includes address information. Try looking up one or two of the addresses in google maps (or another map platform).
+
+We have 291 rows, which isn't very man, but probably still more than we'd want to look up by hand. Instead, we'll use a geocoder--an API which takes in an address and returns a latitude and longitude. There are various services that do that, but the one provided by the census is free and relatively easy to use. We'll use the package `tidygeocoder`. For more detial you can see their vignette here: https://cran.r-project.org/web/packages/tidygeocoder/vignettes/tidygeocoder.html.
+
+The main workhorse function is `geocode`, which takes an address and geocodes it. We set the method to 'census' (other free (like 'osm') and paid (like 'google') options are available). We specify that we want the full results and pass the additional app option that we want to include census geographies.
+
+```{r}
+library(tidygeocoder)
+psq_geocoded <- psq_sample %>% 
+  select(pb_id, address) %>%
+  geocode(
+  address = address,
+  method = "census", full_results = TRUE,
+  api_options = list(census_return_type = 'geographies')
+)
+glimpse(psq_geocoded)
+```
+
+Notice that we have a latidute and longitute (lat, long), but also information about the match type, the matched address, and the state, county, census tract, and even census block. BUT we have lots of NAs there. Let's check them out:
+
+```{r}
+# first check the match types
+psq_geocoded %>% count(match_type)
+```
+
+
+So we have 25 'non-exact' matches, and 40 listings that we were unable to match at all. What do those 40 look like?
+
+```{r}
+psq_geocoded %>% filter(is.na(match_type)) %>% select(address)
+```
+
+These addresses don't look too bad. It's likely that we could make some of them work in the geocoder.
+
+Let's start by seeing how they'll do in the 'osm' geocoder. It's a little more flexible than the census geocoder, but much slower and doesn't automatically give us lat lon, we'll have to go back through the census geocoder for that.
+
+```{r}
+psq_round2 <- psq_geocoded %>% 
+  filter(is.na(match_type)) %>%
+  select(pb_id, address) %>%
+  geocode(
+  address = address,
+  method = "osm"
+)
+glimpse(psq_round2)
+```
+```{r}
+psq_round2 %>% filter(is.na(lat)) %>% select(address)
+```
+
+We're still missing these 8 addresses. If we really needed to, we could likely do these by hand (or find a way to clean them up!), but for this purpose, we'll leave them.
+
+We'll have to use a spatial join to connect these to counties. We'll get counties using the `tigris` library, and then join them to our data.
+
+```{r}
+library(tigris)
+library(sf)
+
+# spatialize lat lon from psq_round2
+psq_round2_geo <- psq_round2 %>% 
+  filter(!is.na(long)) %>%
+  # have to tell where the coordinates are and set CRS!
+  st_as_sf(coords = c('long','lat'), crs = 4326)
+
+# get counties
+geo_counties <- counties(state = "IL") 
+
+# align CRS, this is really important!
+
+geo_counties <- st_transform(geo_counties, crs = st_crs(psq_round2_geo))
+
+psq_round2 <- psq_round2_geo %>% 
+  # find the counti it's within
+  st_join(geo_counties %>% select(STATEFP, COUNTYFP), st_within) %>%
+  # drop geodata for now
+  st_drop_geometry() %>% 
+  # add lat lon back on
+  left_join(psq_round2)
+
+## now we need to join this back on to our full data
+psq_geocoded <- psq_geocoded %>% 
+  # align names
+  rename(STATEFP = state_fips, COUNTYFP = county_fips) %>%
+  # drop NAs
+  drop_na(STATEFP) %>%
+  # bind rows
+  bind_rows(psq_round2) %>%
+  # limit rows
+  select(pb_id, address, lat, long, STATEFP, COUNTYFP) %>%
+  # drop duplicates
+  distinct(.keep_all = TRUE)
+
+```
+
+
+
+# 2) Get data from the census to join to our geocoded data
+
+Ok, so now we have 246 of the 253 listings geocoded. Let's join them to some census data and make some maps.
+
+This script is a worked example for finding census variables and downloading
+them using the census api and the tidycensus R wrapper on that api.
+The process works like this:
+1) Load the libraries (tidyverse and tidycensus)
+2) Decide what census data source you want to use
+  - There are many choices an overview of available apis is here: 
+        https://www.census.gov/data/developers/data-sets.html
+  - An overview of the data available through tidycensus is here: 
+        https://walker-data.com/tidycensus/reference/load_variables.html
+  - We'll be looking primarily at American Community Survey 5-year Estimates 
+      at the Tract level in this example, but you can use a _similar_ workflow
+      to get data at other levels
+3) Decide what variables you want from that data source
+  - Here, we'll look for data on ethnoracial composition and rent
+4) Find the variable codes using the load_variables() function
+5) Use the get_acs() function to download the data we want from the census
+6) Explore our data using some basic plots
+
+
 we're going to use the American Community Survey 5-year (ACS 5) for this example, but you can use other stuff!
 
 # 3) Decide what variables you want from that data source
@@ -47,6 +152,7 @@ for a particular year and for a particular data source. Here we're asking for
 the variables from 2021 from the ACS 5-year estimates.
 
 ```{r}
+library(tidycensus)
 acs_vars <- load_variables(2021, 'acs5')
 
 # glimse what we got
@@ -98,7 +204,7 @@ I'm using this function to get tract-level data on my variables for the
 acs five year ending in 2021 (2017-2021), and just for Illinois.
 
 ```{r results='hide'}
-acs_21 <- get_acs('tract', variables = my_vars, year = 2021, state = 'IL')
+acs_23 <- get_acs('county', variables = my_vars, year = 2023, state = 'IL')
 ```
 
 
@@ -107,7 +213,7 @@ move it to wide format to use it well. Also, we generally want the ethnoracial
 _proportions_ rather than the counts, so we'll also make those in this step
 
 ```{r}
-acs_21 <- acs_21 %>% 
+acs_23 <- acs_23 %>% 
   # we're dropping the margin of error because we won't use it here
   select(-moe) %>%
   pivot_wider(names_from = 'variable', values_from = 'estimate') %>%
@@ -121,7 +227,7 @@ Now we can make plots of these variables
 
 ```{r}
 # a histogram of latinx population in IL
-acs_21 %>% ggplot(aes(latinx_prop))+
+acs_23 %>% ggplot(aes(latinx_prop))+
   geom_histogram()
 ```
 
@@ -129,9 +235,11 @@ acs_21 %>% ggplot(aes(latinx_prop))+
 a scatterplot of latinx prop by  black prop
 
 ```{r}
-acs_21 %>% ggplot(aes(black_prop, latinx_prop))+
+acs_23 %>% ggplot(aes(black_prop, latinx_prop))+
   geom_point()
 ```
+
+
 
 # Practice
 
