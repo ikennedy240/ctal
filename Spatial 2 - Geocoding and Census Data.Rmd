@@ -47,7 +47,7 @@ psq_geocoded %>% count(match_type)
 ```
 
 
-So we have 25 'non-exact' matches, and 40 listings that we were unable to match at all. What do those 40 look like?
+So we have 20 'non-exact' matches, and 35 listings that we were unable to match at all. What do those 35 look like?
 
 ```{r}
 psq_geocoded %>% filter(is.na(match_type)) %>% select(address)
@@ -67,11 +67,13 @@ psq_round2 <- psq_geocoded %>%
 )
 glimpse(psq_round2)
 ```
+
+
 ```{r}
 psq_round2 %>% filter(is.na(lat)) %>% select(address)
 ```
 
-We're still missing these 8 addresses. If we really needed to, we could likely do these by hand (or find a way to clean them up!), but for this purpose, we'll leave them.
+We're still missing these 7 addresses. If we really needed to, we could likely do these by hand (or find a way to clean them up!), but for this purpose, we'll leave them.
 
 We'll have to use a spatial join to connect these to counties. We'll get counties using the `tigris` library, and then join them to our data.
 
@@ -153,7 +155,7 @@ the variables from 2021 from the ACS 5-year estimates.
 
 ```{r}
 library(tidycensus)
-acs_vars <- load_variables(2021, 'acs5')
+acs_vars <- load_variables(2023, 'acs5')
 
 # glimse what we got
 glimpse(acs_vars)
@@ -166,7 +168,7 @@ the phrase 'HISPANIC OR LATINO', the carrot ^ at the beginning tells R to look f
 the phrase at the start of the string
 
 ```{r}
-acs_vars %>% filter(str_detect(concept, 'MEDIAN INCOME')) %>%
+acs_vars %>% filter(str_detect(concept, 'Median Income')) %>%
   # then I want to count the available concepts
   count(concept) %>% arrange(desc(n))
 ```
@@ -178,7 +180,7 @@ This code filters to only concepts with the exact name 'HISPANIC OR LATINO ORIGI
 
 
 ```{r}
-acs_vars %>% filter(concept == 'MEDIAN INCOME IN THE PAST 12 MONTHS (IN 2021 INFLATION-ADJUSTED DOLLARS) BY PLACE OF BIRTH IN THE UNITED STATES') %>%
+acs_vars %>% filter(concept == 'Median Income in the Past 12 Months (in 2023 Inflation-Adjusted Dollars) by Place of Birth in the United States') %>%
   # selecting only these vars to make it easy to see
   select(name, label)
 ```
@@ -208,7 +210,8 @@ acs_23 <- get_acs('county', variables = my_vars, year = 2023, state = 'IL')
 ```
 
 
-It turns out that we get the data in 'long' format, so we'll have to 
+It turns out that we get the data in 'long' format (we can get it wide, but this 
+ends up being slightly easier), so we'll have to 
 move it to wide format to use it well. Also, we generally want the ethnoracial
 _proportions_ rather than the counts, so we'll also make those in this step
 
@@ -253,9 +256,9 @@ The census API can also send us the geometries for each tract along with the pop
 
 
 ```{r results='hide'}
-acs_21_geo <- get_acs('county', variables = my_vars, year = 2021, state = 'IL',
+acs_23_geo <- get_acs('county', variables = my_vars, year = 2023, state = 'IL',
                       geometry = TRUE)
-acs_21_geo <- acs_21_geo%>% select(-moe) %>%
+acs_23_geo <- acs_23_geo %>% select(-moe) %>%
   pivot_wider(names_from = 'variable', values_from = 'estimate') %>%
   mutate(across(c(white, black, aian, asian, nhopi,latinx), .names = "{.col}_prop",.fns = function(x) x/re_total))
 ```
@@ -263,18 +266,21 @@ acs_21_geo <- acs_21_geo%>% select(-moe) %>%
 
 ```{r results='asis'}
 library(leaflet)
-pal <- colorNumeric("YlOrRd", domain = acs_21_geo$asian_prop)
-m <- acs_21_geo %>% 
+pal <- colorNumeric("YlOrRd", domain = acs_23_geo$asian_prop)
+m <- acs_23_geo %>% 
   leaflet() %>% 
   addTiles() %>% 
-  addPolygons(fillColor = ~pal(acs_21_geo$asian_prop), 
+  addPolygons(fillColor = ~pal(asian_prop), 
               fillOpacity = 0.7,
               weight = 3,
               color = "#666",
-              label = round(100*acs_21_geo$asian_prop, 2))
+              label = ~round(100*asian_prop, 2))
 m
 ```
 
 # Practice
 
-Remake the plot above, but use rent as the variable that determines the color of each county.
+1. Join the PSQ data to the census data (you can either use a spatial join, or 
+notice that there's a shared column!)
+2. Remake the map of IL but color and label each county with the number of psq listings
+3. Conduct an analysis investigating the association between the number of listings and the ethnoracial variables from the census.
